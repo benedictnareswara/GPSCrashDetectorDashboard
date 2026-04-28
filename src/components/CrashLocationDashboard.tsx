@@ -43,6 +43,7 @@ function timeAgo(tsMs: number) {
   if (seconds < 60) return `${seconds} seconds ago`;
   const minutes = Math.round(seconds / 60);
   return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
+}
 
 const statusStyles: Record<DeviceStatus, string> = {
   crash: "bg-emergency text-emergency-foreground",
@@ -94,7 +95,7 @@ function SummaryField({ label, value, icon: Icon }: { label: string; value: stri
   );
 }
 
-
+export function CrashLocationDashboard() {
   // Use the MQTT fleet hook inside the component (fixes invalid hook call)
   const { fleet: fleetObj } = useMqttFleet();
   // Convert fleet object to array of DevicePacket
@@ -263,7 +264,7 @@ function SummaryField({ label, value, icon: Icon }: { label: string; value: stri
                 ) : <div className="flex h-full items-center justify-center text-muted-foreground">No map data</div>}
                 <div className="pointer-events-none absolute left-4 top-4 rounded-lg border border-border bg-card/95 px-4 py-3 shadow-soft backdrop-blur">
                   <p className={`text-xs font-bold uppercase tracking-[0.14em] ${activeDevice?.status === "crash" ? "text-emergency" : "text-safe"}`}>Map pin</p>
-                  <p className="mt-1 font-mono text-sm text-foreground">{coordinates}</p>
+                  <p className="mt-1 font-mono text-sm font-foreground">{coordinates}</p>
                 </div>
               </div>
             </article>
@@ -330,3 +331,4 @@ function SummaryField({ label, value, icon: Icon }: { label: string; value: stri
     </main>
   );
 }
+
