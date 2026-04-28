@@ -1,6 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useMqttFleet } from "../hooks/useMqttFleet";
 import { AlertTriangle, Clock3, Copy, ExternalLink, MapPin, Navigation, Radio, Search, ShieldCheck } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+} from "./ui/alert-dialog";
 
 type DeviceStatus = "crash" | "online";
 
@@ -34,7 +43,6 @@ function timeAgo(tsMs: number) {
   if (seconds < 60) return `${seconds} seconds ago`;
   const minutes = Math.round(seconds / 60);
   return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
-}
 
 const statusStyles: Record<DeviceStatus, string> = {
   crash: "bg-emergency text-emergency-foreground",
@@ -86,7 +94,7 @@ function SummaryField({ label, value, icon: Icon }: { label: string; value: stri
   );
 }
 
-export function CrashLocationDashboard() {
+
   // Use the MQTT fleet hook inside the component (fixes invalid hook call)
   const { fleet: fleetObj } = useMqttFleet();
   // Convert fleet object to array of DevicePacket
@@ -98,14 +106,12 @@ export function CrashLocationDashboard() {
     ts_ms: entry.data.ts_ms ?? entry.data.timestamp ?? entry.lastSeen,
     status: entry.status,
   }));
-  // Later integration point:
-  // 1. Subscribe to your HiveMQ topic in a backend/API layer.
-  // 2. Validate the incoming JSON payload matches DevicePacket fields.
-  // 3. Update this fleet data from live messages instead of the demo array above.
-  // 4. Mark a device as `status: "crash"` when your crash-detection source code reports an incident.
+
   const priorityDevice = fleet.find((device: DevicePacket) => device.status === "crash") ?? fleet[0];
   const [selectedDeviceId, setSelectedDeviceId] = useState(priorityDevice?.device ?? "");
   const [search, setSearch] = useState("");
+  const [crashHistory, setCrashHistory] = useState<{ device: string; ts: number; code: string }[]>([]);
+  const [crashAlertOpen, setCrashAlertOpen] = useState(false);
 
   const filteredFleet = useMemo(
     () => fleet.filter((device: DevicePacket) => device.device.toLowerCase().includes(search.toLowerCase().trim())),
@@ -115,28 +121,51 @@ export function CrashLocationDashboard() {
   const incidentQueue = filteredFleet.filter((device: DevicePacket) => device.status === "crash");
   const normalFleet = filteredFleet.filter((device: DevicePacket) => device.status === "online");
   const currentState = activeDevice?.status === "crash" ? "Crash Detected" : "Online";
-  const coordinates = activeDevice ? `${activeDevice.lat.toFixed(6)}, ${activeDevice.lon.toFixed(6)}` : "";
+  const coordinates = activeDevice ? `${activeDevice.lat?.toFixed?.(6) ?? "---"}, ${activeDevice.lon?.toFixed?.(6) ?? "---"}` : "---";
   // Google Maps handoff URL generated from the selected device coordinates.
-  const googleMapsUrl = activeDevice ? `https://www.google.com/maps/search/?api=1&query=${activeDevice.lat.toFixed(6)},${activeDevice.lon.toFixed(6)}` : "";
+  const googleMapsUrl = activeDevice && activeDevice.lat && activeDevice.lon
+    ? `https://www.google.com/maps/search/?api=1&query=${activeDevice.lat.toFixed(6)},${activeDevice.lon.toFixed(6)}`
+    : "";
   // Embedded map auto-centers around the selected/crash device coordinates.
-  const mapSrc = activeDevice ? `https://www.openstreetmap.org/export/embed.html?bbox=${activeDevice.lon - 0.018}%2C${
-    activeDevice.lat - 0.013
-  }%2C${activeDevice.lon + 0.018}%2C${activeDevice.lat + 0.013}&layer=mapnik&marker=${activeDevice.lat}%2C${activeDevice.lon}` : "";
+  const mapSrc = activeDevice && activeDevice.lat && activeDevice.lon
+    ? `https://www.openstreetmap.org/export/embed.html?bbox=${activeDevice.lon - 0.018}%2C${
+        activeDevice.lat - 0.013
+      }%2C${activeDevice.lon + 0.018}%2C${activeDevice.lat + 0.013}&layer=mapnik&marker=${activeDevice.lat}%2C${activeDevice.lon}`
+    : "";
 
-  // If there are no devices, show a friendly message and return early
-  if (!activeDevice) {
-    return (
-      <main className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold mb-2">No devices found</h1>
-          <p className="text-muted-foreground">Waiting for device data from MQTT. Make sure your ESP is publishing to the correct topic.</p>
-        </div>
-      </main>
-    );
+  // Always show dashboard, but use placeholders if no data
+  useEffect(() => {
+    if (activeDevice?.status === "crash") setCrashAlertOpen(true);
+  }, [activeDevice?.status]);
+
+  function handleCrashResolve() {
+    if (activeDevice) {
+      setCrashHistory((prev) => [
+        ...prev,
+        { device: activeDevice.device, ts: Date.now(), code: activeDevice.status === "crash" ? "CRASH_CONFIRMED" : "ONLINE" }
+      ]);
+    }
+    setCrashAlertOpen(false);
   }
 
   return (
     <main className="min-h-screen bg-background text-foreground">
+      {/* Crash Alert Modal */}
+      <AlertDialog open={crashAlertOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Crash Detected!</AlertDialogTitle>
+            <AlertDialogDescription>
+              A crash was detected on device <b>{activeDevice?.device || "---"}</b>.<br />
+              Please review the incident and resolve when safe.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={handleCrashResolve}>Resolve Crash</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="mx-auto grid min-h-screen w-full max-w-390 lg:grid-cols-[360px_1fr]">
         <aside className="border-b border-border bg-sidebar p-4 lg:border-b-0 lg:border-r lg:p-5">
           <div className="flex items-center justify-between gap-4">
@@ -171,18 +200,18 @@ export function CrashLocationDashboard() {
               <span className="rounded-full bg-emergency px-2.5 py-1 text-xs font-bold text-emergency-foreground">{incidentQueue.length}</span>
             </div>
             <div className="grid gap-3">
-              {incidentQueue.map((device) => (
-                <DeviceCard key={device.device} device={device} active={device.device === activeDevice.device} onSelect={() => setSelectedDeviceId(device.device)} />
-              ))}
+              {incidentQueue.length > 0 ? incidentQueue.map((device) => (
+                <DeviceCard key={device.device} device={device} active={device.device === activeDevice?.device} onSelect={() => setSelectedDeviceId(device.device)} />
+              )) : <div className="text-muted-foreground text-sm">No active incidents</div>}
             </div>
           </section>
 
           <section className="mt-6">
             <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground">Fleet devices</h2>
             <div className="grid gap-3">
-              {normalFleet.map((device) => (
-                <DeviceCard key={device.device} device={device} active={device.device === activeDevice.device} onSelect={() => setSelectedDeviceId(device.device)} />
-              ))}
+              {normalFleet.length > 0 ? normalFleet.map((device) => (
+                <DeviceCard key={device.device} device={device} active={device.device === activeDevice?.device} onSelect={() => setSelectedDeviceId(device.device)} />
+              )) : <div className="text-muted-foreground text-sm">No online devices</div>}
             </div>
           </section>
         </aside>
@@ -191,7 +220,7 @@ export function CrashLocationDashboard() {
           <header>
             <div
               className={`mb-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-bold ${
-                activeDevice.status === "crash" ? "bg-emergency-muted text-emergency" : "bg-safe-muted text-safe"
+                activeDevice?.status === "crash" ? "bg-emergency-muted text-emergency" : "bg-safe-muted text-safe"
               }`}
             >
               <AlertTriangle className="h-4 w-4" aria-hidden="true" />
@@ -199,12 +228,12 @@ export function CrashLocationDashboard() {
             </div>
             <h1 className="text-3xl font-semibold text-foreground sm:text-4xl">Incident Command</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {activeDevice.device} is selected for precise GPS review and location handoff.
+              {activeDevice?.device || "---"} is selected for precise GPS review and location handoff.
             </p>
           </header>
 
           <div className="grid gap-4 md:grid-cols-3">
-            <SummaryField label="Device Identity" value={activeDevice.device} icon={ShieldCheck} />
+            <SummaryField label="Device Identity" value={activeDevice?.device || "---"} icon={ShieldCheck} />
             <SummaryField label="Incident Status" value={currentState} icon={AlertTriangle} />
             <SummaryField label="Precise Location" value={coordinates} icon={MapPin} />
           </div>
@@ -216,38 +245,42 @@ export function CrashLocationDashboard() {
                   <h2 className="text-xl font-semibold text-foreground">Live location map</h2>
                   <p className="mt-1 font-mono text-sm text-muted-foreground">{coordinates}</p>
                 </div>
-                <a
-                  href={googleMapsUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-bold text-primary-foreground transition hover:bg-primary/90"
-                >
-                  <Navigation className="h-4 w-4" aria-hidden="true" />
-                  Open in Google Maps
-                </a>
+                {googleMapsUrl ? (
+                  <a
+                    href={googleMapsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-bold text-primary-foreground transition hover:bg-primary/90"
+                  >
+                    <Navigation className="h-4 w-4" aria-hidden="true" />
+                    Open in Google Maps
+                  </a>
+                ) : null}
               </div>
               <div className="relative min-h-90 bg-muted sm:aspect-video">
-                <iframe key={activeDevice.device} title="Emergency GPS location" src={mapSrc} className="h-full w-full border-0 grayscale-12" loading="lazy" />
+                {mapSrc ? (
+                  <iframe key={activeDevice?.device} title="Emergency GPS location" src={mapSrc} className="h-full w-full border-0 grayscale-12" loading="lazy" />
+                ) : <div className="flex h-full items-center justify-center text-muted-foreground">No map data</div>}
                 <div className="pointer-events-none absolute left-4 top-4 rounded-lg border border-border bg-card/95 px-4 py-3 shadow-soft backdrop-blur">
-                  <p className={`text-xs font-bold uppercase tracking-[0.14em] ${activeDevice.status === "crash" ? "text-emergency" : "text-safe"}`}>Map pin</p>
+                  <p className={`text-xs font-bold uppercase tracking-[0.14em] ${activeDevice?.status === "crash" ? "text-emergency" : "text-safe"}`}>Map pin</p>
                   <p className="mt-1 font-mono text-sm text-foreground">{coordinates}</p>
                 </div>
               </div>
             </article>
 
-            <article className={`rounded-lg border bg-card p-5 shadow-lift ${activeDevice.status === "crash" ? "border-emergency" : "border-border"}`}>
+            <article className={`rounded-lg border bg-card p-5 shadow-lift ${activeDevice?.status === "crash" ? "border-emergency" : "border-border"}`}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className={`text-sm font-bold uppercase tracking-[0.14em] ${activeDevice.status === "crash" ? "text-emergency" : "text-safe"}`}>Location Handoff</p>
+                  <p className={`text-sm font-bold uppercase tracking-[0.14em] ${activeDevice?.status === "crash" ? "text-emergency" : "text-safe"}`}>Location Handoff</p>
                   <h2 className="mt-2 text-2xl font-semibold text-foreground">Golden Action</h2>
                 </div>
-                <MapPin className={`h-6 w-6 ${activeDevice.status === "crash" ? "text-emergency" : "text-safe"}`} aria-hidden="true" />
+                <MapPin className={`h-6 w-6 ${activeDevice?.status === "crash" ? "text-emergency" : "text-safe"}`} aria-hidden="true" />
               </div>
 
               <dl className="mt-6 grid gap-3 text-sm">
                 <div className="rounded-lg bg-secondary p-4">
                   <dt className="text-muted-foreground">Device ID</dt>
-                  <dd className="mt-1 font-mono font-semibold text-foreground">{activeDevice.device}</dd>
+                  <dd className="mt-1 font-mono font-semibold text-foreground">{activeDevice?.device || "---"}</dd>
                 </div>
                 <div className="rounded-lg bg-secondary p-4">
                   <dt className="text-muted-foreground">Coordinates</dt>
@@ -264,18 +297,34 @@ export function CrashLocationDashboard() {
                   <Copy className="h-4 w-4" aria-hidden="true" />
                   Copy Coordinates
                 </button>
-                <a
-                  href={googleMapsUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-3 text-sm font-bold text-primary-foreground transition hover:bg-primary/90"
-                >
-                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
-                  Open in Google Maps
-                </a>
+                {googleMapsUrl ? (
+                  <a
+                    href={googleMapsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-3 text-sm font-bold text-primary-foreground transition hover:bg-primary/90"
+                  >
+                    <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                    Open in Google Maps
+                  </a>
+                ) : null}
               </div>
             </article>
           </div>
+
+          {/* Crash History (optional, for demo) */}
+          {crashHistory.length > 0 && (
+            <div className="mt-8">
+              <h3 className="text-lg font-bold mb-2">Crash History</h3>
+              <ul className="space-y-1 text-sm">
+                {crashHistory.map((entry, idx) => (
+                  <li key={idx} className="text-muted-foreground">
+                    [{new Date(entry.ts).toLocaleString()}] Device <b>{entry.device}</b> - Code: {entry.code}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       </div>
     </main>
