@@ -37,11 +37,13 @@ const formatDateTime = (date) => {
 const DEFAULT_MAP_CENTER = { lat: 14.5995, lng: 120.9842 };
 const MQTT_TOPIC_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || "vestmicro/v1/devices";
 const DEFAULT_MQTT_TOPIC_FILTER = `${MQTT_TOPIC_PREFIX}/#`;
+const normalizeTopicFilter = (topic) => (topic.endsWith("/") ? `${topic}#` : topic);
 const MQTT_TOPIC_FILTERS = [
   ...new Set(
     (import.meta.env.VITE_MQTT_TOPIC_FILTER || DEFAULT_MQTT_TOPIC_FILTER)
       .split(",")
       .map((topic) => topic.trim())
+      .map(normalizeTopicFilter)
       .filter(Boolean),
   ),
 ];
@@ -423,7 +425,7 @@ export default function App() {
         console.log(`[GPS Crash Dashboard] MQTT connected: ${nextBrokerUrl}`);
         setConnected(true);
 
-        client.subscribe(MQTT_TOPIC_FILTERS, { qos: 1 }, (err) => {
+        client.subscribe(MQTT_TOPIC_FILTERS, { qos: 0 }, (err) => {
           if (err) {
             console.warn(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTERS.join(", ")}:`, err);
             scheduleReconnect(normalizedIndex + 1);
