@@ -35,9 +35,16 @@ const formatDateTime = (date) => {
 };
 
 const DEFAULT_MAP_CENTER = { lat: 14.5995, lng: 120.9842 };
-const MQTT_BROKER_URL = import.meta.env.VITE_MQTT_BROKER || "wss://broker.hivemq.com:8884/mqtt";
 const MQTT_TOPIC_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || "vestmicro/v1/devices";
 const MQTT_TOPIC_FILTER = import.meta.env.VITE_MQTT_TOPIC_FILTER || `${MQTT_TOPIC_PREFIX}/+/events`;
+const DEFAULT_MQTT_BROKERS = ["ws://broker.hivemq.com:8000/mqtt", "wss://broker.hivemq.com:8884/mqtt"];
+const MQTT_BROKER_URLS = [
+  ...new Set([
+    ...(import.meta.env.VITE_MQTT_BROKER || "").split(",").map((url) => url.trim()).filter(Boolean),
+    ...DEFAULT_MQTT_BROKERS,
+  ]),
+].filter((url) => window.location.protocol !== "https:" || url.startsWith("wss://"));
+const INCIDENT_EVENTS = new Set(["CRASH_CONFIRMED", "CRASH_DETECTED", "CRASH", "MANUAL"]);
 
 const getFirstDefined = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
 
@@ -48,14 +55,21 @@ const parseFiniteNumber = (...values) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-const isCrashEvent = (data, eventText) => {
+const isIncidentEvent = (data, eventText) => {
   const explicitCrashFlag =
     data.crash === true ||
     data.isCrash === true ||
     data.crashDetected === true ||
     data.crash_detected === true;
 
-  return explicitCrashFlag || eventText === "CRASH_CONFIRMED" || eventText === "CRASH_DETECTED" || eventText === "CRASH";
+  return explicitCrashFlag || INCIDENT_EVENTS.has(eventText);
+};
+
+const incidentLabel = (eventText) => {
+  if (eventText === "MANUAL") return "Manual Alert";
+  if (eventText === "CRASH_CONFIRMED") return "Crash Confirmed";
+  if (eventText === "CRASH_DETECTED" || eventText === "CRASH") return "Crash Detected";
+  return "Incident";
 };
 
 const normalizeCrashPacket = (raw, topic = "") => {
@@ -91,7 +105,7 @@ const normalizeCrashPacket = (raw, topic = "") => {
         ? new Date(tsValue).toISOString()
         : new Date().toISOString();
   const eventText = String(getFirstDefined(data.event, data.status, data.type, data.code, "")).toUpperCase();
-  const isCrash = parsed && isCrashEvent(data, eventText);
+  const isIncident = parsed && isIncidentEvent(data, eventText);
 
   return {
     deviceId,
@@ -99,8 +113,8 @@ const normalizeCrashPacket = (raw, topic = "") => {
     lng,
     timestamp: Number.isNaN(Date.parse(timestamp)) ? new Date().toISOString() : timestamp,
     event: eventText || "UNKNOWN",
-    isCrash,
-    status: isCrash ? "CRASH_DETECTED" : eventText || "ONLINE",
+    isIncident,
+    status: isIncident ? eventText || "INCIDENT" : eventText || "ONLINE",
     raw: data,
     topic,
   };
@@ -175,6 +189,8 @@ export default function App() {
 
   // --- Connection ---
   const [connected, setConnected] = useState(false);
+  const [bridgeConnected, setBridgeConnected] = useState(false);
+  const [brokerUrl, setBrokerUrl] = useState(MQTT_BROKER_URLS[0] || "");
   const mqttClientRef = useRef(null);
 
   // --- Active Incidents (keyed by deviceId) ---
@@ -304,43 +320,80 @@ export default function App() {
   // MQTT CONNECTION
   // =======================
   useEffect(() => {
-    const client = mqtt.connect(MQTT_BROKER_URL, {
-      clientId: `web_client_${Math.random().toString(16).slice(2, 10)}`,
-      clean: true,
-      connectTimeout: 4000,
-      reconnectPeriod: 1000,
-    });
+    let stopped = false;
+    let reconnectTimer = null;
 
-    mqttClientRef.current = client;
+    const connectToBroker = (brokerIndex = 0) => {
+      if (stopped || MQTT_BROKER_URLS.length === 0) return;
 
-    client.on("connect", () => {
-      console.log(`[GPS Crash Dashboard] MQTT connected: ${MQTT_BROKER_URL}`);
-      setConnected(true);
+      const normalizedIndex = brokerIndex % MQTT_BROKER_URLS.length;
+      const nextBrokerUrl = MQTT_BROKER_URLS[normalizedIndex];
+      let opened = false;
+      let reconnectScheduled = false;
 
-      client.subscribe(MQTT_TOPIC_FILTER, { qos: 0 }, (err) => {
-        if (err) {
-          console.error(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTER}:`, err);
-          setConnected(false);
-          return;
-        }
-        console.log(`[GPS Crash Dashboard] MQTT subscribed: ${MQTT_TOPIC_FILTER}`);
+      setBrokerUrl(nextBrokerUrl);
+
+      const client = mqtt.connect(nextBrokerUrl, {
+        clientId: `web_client_${Math.random().toString(16).slice(2, 10)}`,
+        clean: true,
+        connectTimeout: 4000,
+        reconnectPeriod: 0,
+        keepalive: 30,
+        protocolVersion: 4,
       });
-    });
 
-    client.on("message", (topic, payload) => {
-      handleIncomingData(payload.toString(), topic);
-    });
+      mqttClientRef.current = client;
 
-    client.on("reconnect", () => setConnected(false));
-    client.on("close", () => setConnected(false));
-    client.on("offline", () => setConnected(false));
-    client.on("error", (err) => {
-      console.error("[GPS Crash Dashboard] MQTT error:", err);
-      setConnected(false);
-    });
+      const scheduleReconnect = (nextIndex) => {
+        if (stopped || reconnectScheduled) return;
+        reconnectScheduled = true;
+        setConnected(false);
+        client.end(true);
+        reconnectTimer = window.setTimeout(() => connectToBroker(nextIndex), 1000);
+      };
+
+      client.on("connect", () => {
+        opened = true;
+        console.log(`[GPS Crash Dashboard] MQTT connected: ${nextBrokerUrl}`);
+        setConnected(true);
+
+        client.subscribe(MQTT_TOPIC_FILTER, { qos: 0 }, (err) => {
+          if (err) {
+            console.warn(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTER}:`, err);
+            scheduleReconnect(normalizedIndex + 1);
+            return;
+          }
+          console.log(`[GPS Crash Dashboard] MQTT subscribed: ${MQTT_TOPIC_FILTER}`);
+        });
+      });
+
+      client.on("message", (topic, payload) => {
+        handleIncomingData(payload.toString(), topic);
+      });
+
+      client.on("close", () => {
+        if (!stopped) {
+          scheduleReconnect(opened ? normalizedIndex : normalizedIndex + 1);
+        }
+      });
+
+      client.on("offline", () => setConnected(false));
+      client.on("error", (err) => {
+        console.warn(`[GPS Crash Dashboard] MQTT error on ${nextBrokerUrl}:`, err);
+        if (!opened) {
+          scheduleReconnect(normalizedIndex + 1);
+        }
+      });
+    };
+
+    connectToBroker(0);
 
     return () => {
-      client.end(true);
+      stopped = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      mqttClientRef.current?.end(true);
       mqttClientRef.current = null;
     };
   }, []);
@@ -353,7 +406,7 @@ export default function App() {
       const incident = normalizeCrashPacket(raw, topic);
       const { deviceId, lat, lng, timestamp } = incident;
 
-      if (!incident.isCrash) {
+      if (!incident.isIncident) {
         if (incidentsRef.current[deviceId]) {
           setIncidents((prev) => {
             const next = { ...prev };
@@ -365,7 +418,7 @@ export default function App() {
             setSelectedIncidentId(null);
           }
         }
-        console.log(`[GPS Crash Dashboard] Ignored non-crash MQTT event from ${deviceId}: ${incident.event}`);
+        console.log(`[GPS Crash Dashboard] Ignored non-incident MQTT event from ${deviceId}: ${incident.event}`);
         return;
       }
 
@@ -398,7 +451,7 @@ export default function App() {
           lat,
           lng,
           timestamp,
-          status: "CRASH_CONFIRMED",
+          status: incident.event,
         };
 
         setCrashHistory((prev) => [historyEntry, ...prev]);
@@ -406,7 +459,7 @@ export default function App() {
         // Show toast notification
         addToast({
           type: "crash",
-          title: "Crash Detected",
+          title: incidentLabel(incident.event),
           message: `Device <span>${deviceId}</span> — ${formatTime(timestamp)}`,
           duration: 8000,
         });
@@ -415,7 +468,7 @@ export default function App() {
       }
 
       // Update map
-      updateLiveMarker(deviceId, lat, lng);
+      updateLiveMarker(deviceId, lat, lng, incident.event);
 
       // Pan map to crash
       if (mapInstanceRef.current) {
@@ -424,6 +477,38 @@ export default function App() {
     },
     [addToast, playCrashAlertSound]
   );
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || typeof EventSource === "undefined") return;
+
+    const source = new EventSource("/api/mqtt-events");
+
+    source.onmessage = (event) => {
+      try {
+        const bridgeEvent = JSON.parse(event.data);
+        if (bridgeEvent.type === "status") {
+          setBridgeConnected(Boolean(bridgeEvent.connected));
+          if (bridgeEvent.brokerUrl) {
+            setBrokerUrl(bridgeEvent.brokerUrl);
+          }
+          return;
+        }
+
+        if (bridgeEvent.type === "message") {
+          setBridgeConnected(true);
+          handleIncomingData(bridgeEvent.payload, bridgeEvent.topic);
+        }
+      } catch (err) {
+        console.warn("[GPS Crash Dashboard] Failed to parse bridge event:", err);
+      }
+    };
+
+    source.onerror = () => {
+      setBridgeConnected(false);
+    };
+
+    return () => source.close();
+  }, [handleIncomingData]);
 
   // =======================
   // MAP MARKER HELPERS
@@ -442,17 +527,21 @@ export default function App() {
     });
   };
 
-  const updateLiveMarker = (deviceId, lat, lng) => {
+  const updateLiveMarker = (deviceId, lat, lng, eventText = "CRASH_CONFIRMED") => {
     const map = mapInstanceRef.current;
     if (!map) return;
+    const label = incidentLabel(eventText);
 
     if (markersRef.current[deviceId]) {
       markersRef.current[deviceId].setLatLng([lat, lng]);
+      markersRef.current[deviceId].setPopupContent(
+        `<strong>🚨 ${label}</strong><br/>Device: ${deviceId}<br/>Lat: ${lat.toFixed(6)}<br/>Lng: ${lng.toFixed(6)}`
+      );
     } else {
       const marker = L.marker([lat, lng], { icon: createIcon("live") })
         .addTo(map)
         .bindPopup(
-          `<strong>🚨 Live Crash</strong><br/>Device: ${deviceId}<br/>Lat: ${lat.toFixed(6)}<br/>Lng: ${lng.toFixed(6)}`
+          `<strong>🚨 ${label}</strong><br/>Device: ${deviceId}<br/>Lat: ${lat.toFixed(6)}<br/>Lng: ${lng.toFixed(6)}`
         );
       markersRef.current[deviceId] = marker;
     }
@@ -562,6 +651,7 @@ export default function App() {
 
   // Determine overall status for the status bar
   const hasActiveIncidents = Object.keys(incidents).length > 0;
+  const mqttOnline = connected || bridgeConnected;
 
   // =======================
   // RENDER
@@ -584,9 +674,9 @@ export default function App() {
         </div>
 
         <div className="top-nav-actions">
-          <div className={`connection-indicator ${connected ? "connected" : "disconnected"}`}>
+          <div className={`connection-indicator ${mqttOnline ? "connected" : "disconnected"}`} title={`MQTT broker: ${brokerUrl || "not configured"}`}>
             <span className="connection-dot"></span>
-            {connected ? "Connected" : "Disconnected"}
+            {mqttOnline ? "Connected" : "Disconnected"}
           </div>
 
           <button className="nav-btn" onClick={toggleTheme} title="Toggle Theme">
@@ -657,7 +747,7 @@ export default function App() {
                 >
                   <div className="incident-card-header">
                     <span className="incident-device-id">{inc.deviceId}</span>
-                    <span className="incident-badge crash">Crash</span>
+                    <span className="incident-badge crash">{inc.event === "MANUAL" ? "Manual" : "Crash"}</span>
                   </div>
                   <div className="incident-card-details">
                     <div className="incident-detail">
@@ -683,7 +773,7 @@ export default function App() {
               {hasActiveIncidents ? (
                 <div className="status-chip crash">
                   <i className="fa-solid fa-triangle-exclamation"></i>
-                  Crash Detected — {Object.keys(incidents).length} Active
+                  Incident Active — {Object.keys(incidents).length}
                 </div>
               ) : (
                 <div className="status-chip idle">
@@ -716,11 +806,11 @@ export default function App() {
               <div className="map-legend-title">Legend</div>
               <div className="map-legend-item">
                 <span className="legend-dot live"></span>
-                Live Crash
+                Live Incident
               </div>
               <div className="map-legend-item">
                 <span className="legend-dot history"></span>
-                Historical Crash
+                Historical Incident
               </div>
               <div className="map-legend-item">
                 <span className="legend-dot resolved"></span>
@@ -753,8 +843,8 @@ export default function App() {
                 </div>
                 <div className="info-row">
                   <span className="info-label">Status</span>
-                  <span className="info-value" style={{ color: "var(--accent-red)" }}>
-                    CRASH DETECTED
+                <span className="info-value" style={{ color: "var(--accent-red)" }}>
+                    {incidentLabel(selectedIncident.event).toUpperCase()}
                   </span>
                 </div>
                 <div className="info-row">
@@ -817,12 +907,12 @@ export default function App() {
             </div>
           )}
 
-          {/* ===== CRASH HISTORY ===== */}
+          {/* ===== INCIDENT HISTORY ===== */}
           <div className="crash-history-section">
             <div className="crash-history-header" onClick={() => setHistoryExpanded(!historyExpanded)}>
               <div className="crash-history-header-left">
                 <i className="fa-solid fa-clock-rotate-left"></i>
-                Crash History
+                Incident History
                 {crashHistory.length > 0 && <span className="history-count">{crashHistory.length}</span>}
               </div>
               <i className={`fa-solid fa-chevron-down crash-history-toggle ${historyExpanded ? "expanded" : ""}`}></i>
@@ -830,7 +920,7 @@ export default function App() {
 
             <div className={`crash-history-list ${historyExpanded ? "expanded" : ""}`}>
               {crashHistory.length === 0 ? (
-                <div className="empty-history">No crash events recorded yet</div>
+                <div className="empty-history">No incidents recorded yet</div>
               ) : (
                 crashHistory.map((entry) => (
                   <div
@@ -858,7 +948,7 @@ export default function App() {
                           entry.status === "RESOLVED" ? "resolved" : "crash-confirmed"
                         }`}
                       >
-                        {entry.status === "RESOLVED" ? "Resolved" : "Crash"}
+                        {entry.status === "RESOLVED" ? "Resolved" : entry.status === "MANUAL" ? "Manual" : "Crash"}
                       </span>
                       <button
                         className="history-map-btn"
