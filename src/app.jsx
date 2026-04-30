@@ -475,17 +475,6 @@ export default function App() {
       const { deviceId, lat, lng, timestamp } = incident;
 
       if (!incident.isIncident) {
-        if (incidentsRef.current[deviceId]) {
-          setIncidents((prev) => {
-            const next = { ...prev };
-            delete next[deviceId];
-            return next;
-          });
-          removeLiveMarker(deviceId);
-          if (selectedIncidentIdRef.current === deviceId) {
-            setSelectedIncidentId(null);
-          }
-        }
         console.log(`[GPS Crash Dashboard] Ignored non-incident MQTT event from ${deviceId}: ${incident.event}`);
         return;
       }
