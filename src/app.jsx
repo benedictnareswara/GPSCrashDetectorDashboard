@@ -48,19 +48,32 @@ const parseFiniteNumber = (...values) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const isCrashEvent = (data, eventText) => {
+  const explicitCrashFlag =
+    data.crash === true ||
+    data.isCrash === true ||
+    data.crashDetected === true ||
+    data.crash_detected === true;
+
+  return explicitCrashFlag || eventText === "CRASH_CONFIRMED" || eventText === "CRASH_DETECTED" || eventText === "CRASH";
+};
+
 const normalizeCrashPacket = (raw, topic = "") => {
   let data = raw;
+  let parsed = true;
 
   if (typeof raw === "string") {
     try {
       data = JSON.parse(raw);
     } catch {
       data = { message: raw };
+      parsed = false;
     }
   }
 
   if (!data || typeof data !== "object") {
     data = {};
+    parsed = false;
   }
 
   const topicParts = topic.split("/");
@@ -77,15 +90,19 @@ const normalizeCrashPacket = (raw, topic = "") => {
       : tsValue
         ? new Date(tsValue).toISOString()
         : new Date().toISOString();
-  const eventText = String(getFirstDefined(data.event, data.status, data.type, data.code, "CRASH_CONFIRMED")).toUpperCase();
+  const eventText = String(getFirstDefined(data.event, data.status, data.type, data.code, "")).toUpperCase();
+  const isCrash = parsed && isCrashEvent(data, eventText);
 
   return {
     deviceId,
     lat,
     lng,
     timestamp: Number.isNaN(Date.parse(timestamp)) ? new Date().toISOString() : timestamp,
-    status: eventText.includes("CRASH") ? "CRASH_DETECTED" : eventText,
+    event: eventText || "UNKNOWN",
+    isCrash,
+    status: isCrash ? "CRASH_DETECTED" : eventText || "ONLINE",
     raw: data,
+    topic,
   };
 };
 
@@ -162,9 +179,11 @@ export default function App() {
 
   // --- Active Incidents (keyed by deviceId) ---
   const [incidents, setIncidents] = useState({});
+  const incidentsRef = useRef({});
 
   // --- Selected Incident ---
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
+  const selectedIncidentIdRef = useRef(null);
 
   // --- Crash History ---
   const [crashHistory, setCrashHistory] = useState([]);
@@ -182,6 +201,7 @@ export default function App() {
   const mapInstanceRef = useRef(null);
   const markersRef = useRef({});
   const historyMarkersRef = useRef({});
+  const processedCrashEventsRef = useRef(new Set());
 
   // --- Copy ---
   const [copied, setCopied] = useState(false);
@@ -203,6 +223,14 @@ export default function App() {
   const dismissToast = useCallback((id) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  useEffect(() => {
+    incidentsRef.current = incidents;
+  }, [incidents]);
+
+  useEffect(() => {
+    selectedIncidentIdRef.current = selectedIncidentId;
+  }, [selectedIncidentId]);
 
   const playCrashAlertSound = useCallback(() => {
     try {
@@ -277,10 +305,10 @@ export default function App() {
   // =======================
   useEffect(() => {
     const client = mqtt.connect(MQTT_BROKER_URL, {
-      clientId: `gps_crash_dashboard_${Math.random().toString(16).slice(2, 10)}`,
+      clientId: `web_client_${Math.random().toString(16).slice(2, 10)}`,
       clean: true,
-      connectTimeout: 8000,
-      reconnectPeriod: 3000,
+      connectTimeout: 4000,
+      reconnectPeriod: 1000,
     });
 
     mqttClientRef.current = client;
@@ -325,23 +353,30 @@ export default function App() {
       const incident = normalizeCrashPacket(raw, topic);
       const { deviceId, lat, lng, timestamp } = incident;
 
+      if (!incident.isCrash) {
+        if (incidentsRef.current[deviceId]) {
+          setIncidents((prev) => {
+            const next = { ...prev };
+            delete next[deviceId];
+            return next;
+          });
+          removeLiveMarker(deviceId);
+          if (selectedIncidentIdRef.current === deviceId) {
+            setSelectedIncidentId(null);
+          }
+        }
+        console.log(`[GPS Crash Dashboard] Ignored non-crash MQTT event from ${deviceId}: ${incident.event}`);
+        return;
+      }
+
+      const eventKey = `${deviceId}:${timestamp}:${incident.event}`;
+      const alreadyProcessed = processedCrashEventsRef.current.has(eventKey);
+
       // Update incidents
       setIncidents((prev) => ({
         ...prev,
         [deviceId]: incident,
       }));
-
-      // Add to crash history
-      const historyEntry = {
-        id: nextHistoryId(),
-        deviceId,
-        lat,
-        lng,
-        timestamp,
-        status: "CRASH_CONFIRMED",
-      };
-
-      setCrashHistory((prev) => [historyEntry, ...prev]);
 
       // Update coords
       setDisplayCoords({ lat, lng });
@@ -349,15 +384,35 @@ export default function App() {
       // Auto-select
       setSelectedIncidentId(deviceId);
 
-      // Show toast notification
-      addToast({
-        type: "crash",
-        title: "Crash Detected",
-        message: `Device <span>${deviceId}</span> — ${formatTime(timestamp)}`,
-        duration: 8000,
-      });
+      if (!alreadyProcessed) {
+        processedCrashEventsRef.current.add(eventKey);
+        if (processedCrashEventsRef.current.size > 100) {
+          processedCrashEventsRef.current.clear();
+          processedCrashEventsRef.current.add(eventKey);
+        }
 
-      playCrashAlertSound();
+        // Add to crash history
+        const historyEntry = {
+          id: nextHistoryId(),
+          deviceId,
+          lat,
+          lng,
+          timestamp,
+          status: "CRASH_CONFIRMED",
+        };
+
+        setCrashHistory((prev) => [historyEntry, ...prev]);
+
+        // Show toast notification
+        addToast({
+          type: "crash",
+          title: "Crash Detected",
+          message: `Device <span>${deviceId}</span> — ${formatTime(timestamp)}`,
+          duration: 8000,
+        });
+
+        playCrashAlertSound();
+      }
 
       // Update map
       updateLiveMarker(deviceId, lat, lng);
