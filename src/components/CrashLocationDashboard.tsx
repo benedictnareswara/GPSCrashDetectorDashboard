@@ -31,9 +31,7 @@ type DevicePacket = {
 //   "ts_ms": 1714221000123
 // }
 //
-// Integration placeholder:
-// Replace this demo `fleet` array with live packets from your source code later.
-// Recommended flow: ESP32 -> HiveMQ MQTT broker -> backend/API bridge -> dashboard state.
+// Recommended flow: ESP32 -> HiveMQ MQTT broker -> dashboard state.
 // The dashboard already expects `device`, `lat`, `lon`, `valid`, and `ts_ms` from each packet.
 
 
@@ -313,7 +311,7 @@ export function CrashLocationDashboard() {
             </article>
           </div>
 
-          {/* Crash History (optional, for demo) */}
+          {/* Crash History */}
           {crashHistory.length > 0 && (
             <div className="mt-8">
               <h3 className="text-lg font-bold mb-2">Crash History</h3>
@@ -331,4 +329,3 @@ export function CrashLocationDashboard() {
     </main>
   );
 }
-

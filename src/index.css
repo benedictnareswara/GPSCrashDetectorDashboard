@@ -1105,6 +1105,204 @@ body {
   }
 }
 
+@media (max-width: 900px) {
+  html, body, #root {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+  }
+
+  .dashboard-root {
+    min-height: 100vh;
+    height: auto;
+    overflow: visible;
+  }
+
+  .top-nav {
+    height: auto;
+    min-height: 56px;
+    padding: 10px 14px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .top-nav-brand {
+    min-width: 0;
+  }
+
+  .brand-title {
+    font-size: 15px;
+  }
+
+  .brand-subtitle {
+    font-size: 10px;
+  }
+
+  .top-nav-actions {
+    margin-left: auto;
+  }
+
+  .connection-indicator {
+    margin-right: 0;
+    padding: 7px 10px;
+  }
+
+  .nav-btn,
+  .copy-btn,
+  .history-map-btn,
+  .action-btn {
+    min-height: 44px;
+  }
+
+  .main-content {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .left-sidebar,
+  .right-panel {
+    width: 100%;
+    min-width: 0;
+    max-height: none;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  .left-sidebar {
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .right-panel {
+    border-top: 1px solid var(--border-color);
+  }
+
+  .incidents-list,
+  .right-panel-body {
+    overflow: visible;
+  }
+
+  .center-panel {
+    min-height: 58vh;
+    overflow: visible;
+  }
+
+  .map-status-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .map-status-left,
+  .map-status-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .status-chip,
+  .coord-display {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .copy-btn {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .map-container {
+    height: 56vh;
+    min-height: 360px;
+  }
+
+  .map-legend {
+    bottom: 12px;
+    left: 12px;
+    max-width: calc(100% - 24px);
+  }
+
+  .info-row {
+    align-items: flex-start;
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .info-value,
+  .incident-device-id,
+  .history-card-device {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .crash-history-section {
+    margin-top: 0;
+  }
+
+  .crash-history-list.expanded {
+    max-height: none;
+  }
+
+  .history-card {
+    align-items: flex-start;
+  }
+
+  .history-card-actions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+
+  .toast-container {
+    left: 12px;
+    right: 12px;
+    top: 76px;
+  }
+
+  .toast {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .top-nav {
+    align-items: flex-start;
+  }
+
+  .top-nav-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .search-bar,
+  .sidebar-section,
+  .right-panel-header,
+  .right-panel-body,
+  .crash-history-header,
+  .history-card {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .incident-card-header {
+    align-items: flex-start;
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .map-container {
+    height: 52vh;
+    min-height: 320px;
+  }
+
+  .map-legend {
+    font-size: 10px;
+    padding: 8px 10px;
+  }
+}
+
 /* ===== EMPTY STATE ENHANCEMENTS ===== */
 .empty-history {
   padding: 20px;
@@ -1159,3 +1357,17 @@ body {
 .legend-dot.live { background: #ef4444; }
 .legend-dot.history { background: #f59e0b; }
 .legend-dot.resolved { background: #22c55e; }
+
+@media (max-width: 900px) {
+  .map-legend {
+    bottom: 12px;
+    left: 12px;
+    max-width: calc(100% - 24px);
+  }
+}
+
+@media (max-width: 520px) {
+  .map-legend {
+    padding: 8px 10px;
+  }
+}

@@ -1,6 +1,7 @@
 // src/App.jsx
 import { useState, useEffect, useRef, useCallback } from "react";
 import L from "leaflet";
+import mqtt from "mqtt";
 // ============================================================
 // HELPER: Generate unique IDs
 // ============================================================
@@ -31,6 +32,61 @@ const formatDateTime = (date) => {
     second: "2-digit",
     hour12: true,
   });
+};
+
+const DEFAULT_MAP_CENTER = { lat: 14.5995, lng: 120.9842 };
+const MQTT_BROKER_URL = import.meta.env.VITE_MQTT_BROKER || "wss://broker.hivemq.com:8884/mqtt";
+const MQTT_TOPIC_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || "vestmicro/v1/devices";
+const MQTT_TOPIC_FILTER = import.meta.env.VITE_MQTT_TOPIC_FILTER || `${MQTT_TOPIC_PREFIX}/+/events`;
+
+const getFirstDefined = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+
+const parseFiniteNumber = (...values) => {
+  const value = getFirstDefined(...values);
+  if (value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeCrashPacket = (raw, topic = "") => {
+  let data = raw;
+
+  if (typeof raw === "string") {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw };
+    }
+  }
+
+  if (!data || typeof data !== "object") {
+    data = {};
+  }
+
+  const topicParts = topic.split("/");
+  const deviceFromTopic = topicParts.length >= 4 ? topicParts[3] : null;
+  const deviceId = String(
+    getFirstDefined(data.deviceId, data.device_id, data.device, data.id, data.clientId, deviceFromTopic, "ESP32-UNKNOWN")
+  );
+  const lat = parseFiniteNumber(data.lat, data.latitude, data.gps?.lat, data.location?.lat) ?? DEFAULT_MAP_CENTER.lat;
+  const lng = parseFiniteNumber(data.lng, data.lon, data.longitude, data.gps?.lng, data.gps?.lon, data.location?.lng, data.location?.lon) ?? DEFAULT_MAP_CENTER.lng;
+  const tsValue = getFirstDefined(data.ts_ms, data.timestamp, data.time, data.ts);
+  const timestamp =
+    typeof tsValue === "number"
+      ? new Date(tsValue < 1000000000000 ? tsValue * 1000 : tsValue).toISOString()
+      : tsValue
+        ? new Date(tsValue).toISOString()
+        : new Date().toISOString();
+  const eventText = String(getFirstDefined(data.event, data.status, data.type, data.code, "CRASH_CONFIRMED")).toUpperCase();
+
+  return {
+    deviceId,
+    lat,
+    lng,
+    timestamp: Number.isNaN(Date.parse(timestamp)) ? new Date().toISOString() : timestamp,
+    status: eventText.includes("CRASH") ? "CRASH_DETECTED" : eventText,
+    raw: data,
+  };
 };
 
 // ============================================================
@@ -102,7 +158,7 @@ export default function App() {
 
   // --- Connection ---
   const [connected, setConnected] = useState(false);
-  const wsRef = useRef(null);
+  const mqttClientRef = useRef(null);
 
   // --- Active Incidents (keyed by deviceId) ---
   const [incidents, setIncidents] = useState({});
@@ -133,6 +189,9 @@ export default function App() {
   // --- Current coords display ---
   const [displayCoords, setDisplayCoords] = useState({ lat: null, lng: null });
 
+  // --- Audible alert ---
+  const audioContextRef = useRef(null);
+
   // =======================
   // TOAST HELPERS
   // =======================
@@ -143,6 +202,47 @@ export default function App() {
 
   const dismissToast = useCallback((id) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const playCrashAlertSound = useCallback(() => {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+
+      const context = audioContextRef.current || new AudioContext();
+      audioContextRef.current = context;
+
+      const startTone = (startAt, frequency) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+
+        oscillator.type = "sawtooth";
+        oscillator.frequency.setValueAtTime(frequency, startAt);
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(0.18, startAt + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.24);
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(startAt);
+        oscillator.stop(startAt + 0.26);
+      };
+
+      const schedule = () => {
+        const now = context.currentTime;
+        startTone(now, 880);
+        startTone(now + 0.32, 660);
+        startTone(now + 0.64, 880);
+      };
+
+      if (context.state === "suspended") {
+        context.resume().then(schedule).catch(() => {});
+      } else {
+        schedule();
+      }
+    } catch (err) {
+      console.warn("[GPS Crash Dashboard] Unable to play alert sound:", err);
+    }
   }, []);
 
   // =======================
@@ -173,82 +273,57 @@ export default function App() {
   }, []);
 
   // =======================
-  // WEBSOCKET / MQTT CONNECTION
+  // MQTT CONNECTION
   // =======================
   useEffect(() => {
-    const connectWs = () => {
-      // Try connecting to typical ESP32 MQTT-over-WS or direct WS
-      const wsUrl =
-        import.meta.env.VITE_WS_URL || "ws://localhost:9001/mqtt";
+    const client = mqtt.connect(MQTT_BROKER_URL, {
+      clientId: `gps_crash_dashboard_${Math.random().toString(16).slice(2, 10)}`,
+      clean: true,
+      connectTimeout: 8000,
+      reconnectPeriod: 3000,
+    });
 
-      try {
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
+    mqttClientRef.current = client;
 
-        ws.onopen = () => {
-          console.log("[GPS Crash Dashboard] WebSocket connected");
-          setConnected(true);
+    client.on("connect", () => {
+      console.log(`[GPS Crash Dashboard] MQTT connected: ${MQTT_BROKER_URL}`);
+      setConnected(true);
 
-          // If MQTT, send a subscribe packet or rely on broker auto-forwarding
-          // For raw WS from ESP32, just listen
-        };
-
-        ws.onmessage = (event) => {
-          handleIncomingData(event.data);
-        };
-
-        ws.onerror = (err) => {
-          console.warn("[GPS Crash Dashboard] WS error:", err);
-        };
-
-        ws.onclose = () => {
-          console.log("[GPS Crash Dashboard] WebSocket closed, reconnecting...");
+      client.subscribe(MQTT_TOPIC_FILTER, { qos: 0 }, (err) => {
+        if (err) {
+          console.error(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTER}:`, err);
           setConnected(false);
-          setTimeout(connectWs, 3000);
-        };
-      } catch (err) {
-        console.error("[GPS Crash Dashboard] WS connection failed:", err);
-        setConnected(false);
-        setTimeout(connectWs, 5000);
-      }
-    };
+          return;
+        }
+        console.log(`[GPS Crash Dashboard] MQTT subscribed: ${MQTT_TOPIC_FILTER}`);
+      });
+    });
 
-    connectWs();
+    client.on("message", (topic, payload) => {
+      handleIncomingData(payload.toString(), topic);
+    });
+
+    client.on("reconnect", () => setConnected(false));
+    client.on("close", () => setConnected(false));
+    client.on("offline", () => setConnected(false));
+    client.on("error", (err) => {
+      console.error("[GPS Crash Dashboard] MQTT error:", err);
+      setConnected(false);
+    });
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      client.end(true);
+      mqttClientRef.current = null;
     };
   }, []);
 
   // =======================
-  // HANDLE INCOMING DATA — ANY packet = CRASH
+  // HANDLE INCOMING MQTT CRASH DATA
   // =======================
   const handleIncomingData = useCallback(
-    (raw) => {
-      let data;
-      try {
-        data = typeof raw === "string" ? JSON.parse(raw) : raw;
-      } catch {
-        // Even if unparseable, treat it as a crash from unknown device
-        data = {};
-      }
-
-      const deviceId = data.deviceId || data.device_id || data.id || "ESP32-UNKNOWN";
-      const lat = parseFloat(data.lat || data.latitude) || 14.5995;
-      const lng = parseFloat(data.lng || data.longitude || data.lon) || 120.9842;
-      const timestamp = new Date().toISOString();
-
-      // === ANY data = CRASH_CONFIRMED ===
-      const incident = {
-        deviceId,
-        lat,
-        lng,
-        timestamp,
-        status: "CRASH_DETECTED",
-        raw: data,
-      };
+    (raw, topic = "") => {
+      const incident = normalizeCrashPacket(raw, topic);
+      const { deviceId, lat, lng, timestamp } = incident;
 
       // Update incidents
       setIncidents((prev) => ({
@@ -282,6 +357,8 @@ export default function App() {
         duration: 8000,
       });
 
+      playCrashAlertSound();
+
       // Update map
       updateLiveMarker(deviceId, lat, lng);
 
@@ -290,7 +367,7 @@ export default function App() {
         mapInstanceRef.current.flyTo([lat, lng], 16, { duration: 1.2 });
       }
     },
-    [addToast]
+    [addToast, playCrashAlertSound]
   );
 
   // =======================
@@ -432,21 +509,6 @@ export default function App() {
   const hasActiveIncidents = Object.keys(incidents).length > 0;
 
   // =======================
-  // SIMULATE (for testing — remove in production)
-  // =======================
-  const simulateCrash = () => {
-    const fakeData = JSON.stringify({
-      deviceId: `ESP32-${String(Math.floor(Math.random() * 9000) + 1000)}`,
-      lat: 14.5995 + (Math.random() - 0.5) * 0.02,
-      lng: 120.9842 + (Math.random() - 0.5) * 0.02,
-      accel_x: Math.random() * 20,
-      accel_y: Math.random() * 20,
-      accel_z: Math.random() * 20,
-    });
-    handleIncomingData(fakeData);
-  };
-
-  // =======================
   // RENDER
   // =======================
   return (
@@ -471,10 +533,6 @@ export default function App() {
             <span className="connection-dot"></span>
             {connected ? "Connected" : "Disconnected"}
           </div>
-
-          <button className="nav-btn" onClick={simulateCrash} title="Simulate Crash (Testing)">
-            <i className="fa-solid fa-bolt"></i>
-          </button>
 
           <button className="nav-btn" onClick={toggleTheme} title="Toggle Theme">
             <i className={`fa-solid ${theme === "dark" ? "fa-sun" : "fa-moon"}`}></i>
