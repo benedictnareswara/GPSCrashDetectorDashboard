@@ -36,15 +36,38 @@ const formatDateTime = (date) => {
 
 const DEFAULT_MAP_CENTER = { lat: 14.5995, lng: 120.9842 };
 const MQTT_TOPIC_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || "vestmicro/v1/devices";
-const MQTT_TOPIC_FILTER = import.meta.env.VITE_MQTT_TOPIC_FILTER || `${MQTT_TOPIC_PREFIX}/+/events`;
-const DEFAULT_MQTT_BROKERS = ["ws://broker.hivemq.com:8000/mqtt", "wss://broker.hivemq.com:8884/mqtt"];
+const DEFAULT_MQTT_TOPIC_FILTER = `${MQTT_TOPIC_PREFIX}/#`;
+const MQTT_TOPIC_FILTERS = [
+  ...new Set(
+    (import.meta.env.VITE_MQTT_TOPIC_FILTER || DEFAULT_MQTT_TOPIC_FILTER)
+      .split(",")
+      .map((topic) => topic.trim())
+      .filter(Boolean),
+  ),
+];
+const DEFAULT_MQTT_BROKERS = ["wss://broker.hivemq.com:8884/mqtt"];
 const MQTT_BROKER_URLS = [
   ...new Set([
     ...(import.meta.env.VITE_MQTT_BROKER || "").split(",").map((url) => url.trim()).filter(Boolean),
     ...DEFAULT_MQTT_BROKERS,
   ]),
 ].filter((url) => window.location.protocol !== "https:" || url.startsWith("wss://"));
-const INCIDENT_EVENTS = new Set(["CRASH_CONFIRMED", "CRASH_DETECTED", "CRASH", "MANUAL"]);
+const INCIDENT_EVENTS = new Set([
+  "ACCIDENT",
+  "ACCIDENT_DETECTED",
+  "ALERT",
+  "COLLISION",
+  "CRASH",
+  "CRASH_CONFIRMED",
+  "CRASH_DETECTED",
+  "CRASHED",
+  "EMERGENCY",
+  "IMPACT",
+  "IMPACT_DETECTED",
+  "MANUAL",
+  "SOS",
+]);
+const CLEAR_EVENTS = new Set(["CLEAR", "NO_CRASH", "NORMAL", "OK", "ONLINE", "RESOLVED", "SAFE"]);
 
 const getFirstDefined = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
 
@@ -55,20 +78,67 @@ const parseFiniteNumber = (...values) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-const isIncidentEvent = (data, eventText) => {
-  const explicitCrashFlag =
-    data.crash === true ||
-    data.isCrash === true ||
-    data.crashDetected === true ||
-    data.crash_detected === true;
+const normalizeTimestamp = (value) => {
+  const date =
+    typeof value === "number"
+      ? new Date(value < 1000000000000 ? value * 1000 : value)
+      : value
+        ? new Date(value)
+        : new Date();
 
-  return explicitCrashFlag || INCIDENT_EVENTS.has(eventText);
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+};
+
+const normalizeEventText = (...values) => {
+  const value = getFirstDefined(...values);
+  if (value === undefined) return "";
+  return String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+};
+
+const isTruthyFlag = (value) => {
+  if (value === true || value === 1) return true;
+  if (typeof value === "string") {
+    return ["1", "TRUE", "YES", "Y", "CRASH", "CRASHED", "DETECTED"].includes(value.trim().toUpperCase());
+  }
+  return false;
+};
+
+const hasExplicitCrashFlag = (data) =>
+  isTruthyFlag(data.crash) ||
+  isTruthyFlag(data.isCrash) ||
+  isTruthyFlag(data.crashDetected) ||
+  isTruthyFlag(data.crash_detected) ||
+  isTruthyFlag(data.accident) ||
+  isTruthyFlag(data.impactDetected) ||
+  isTruthyFlag(data.impact_detected);
+
+const isIncidentEvent = (data, eventText, explicitCrashFlag = hasExplicitCrashFlag(data)) => {
+  if (CLEAR_EVENTS.has(eventText) || eventText.startsWith("NO_CRASH") || eventText.startsWith("NOT_CRASH")) return false;
+
+  const eventWords = new Set(eventText.split("_").filter(Boolean));
+  const eventLooksLikeIncident =
+    eventWords.has("CRASH") ||
+    eventWords.has("CRASHED") ||
+    eventWords.has("ACCIDENT") ||
+    eventWords.has("COLLISION") ||
+    eventWords.has("IMPACT") ||
+    eventWords.has("EMERGENCY") ||
+    eventWords.has("SOS");
+
+  return explicitCrashFlag || INCIDENT_EVENTS.has(eventText) || eventLooksLikeIncident;
 };
 
 const incidentLabel = (eventText) => {
   if (eventText === "MANUAL") return "Manual Alert";
+  if (eventText === "EMERGENCY" || eventText === "SOS" || eventText === "ALERT") return "Emergency Alert";
+  if (eventText === "ACCIDENT" || eventText === "ACCIDENT_DETECTED" || eventText === "COLLISION") return "Accident Detected";
+  if (eventText === "IMPACT" || eventText === "IMPACT_DETECTED") return "Impact Detected";
   if (eventText === "CRASH_CONFIRMED") return "Crash Confirmed";
-  if (eventText === "CRASH_DETECTED" || eventText === "CRASH") return "Crash Detected";
+  if (eventText === "CRASH_DETECTED" || eventText === "CRASH" || eventText === "CRASHED") return "Crash Detected";
   return "Incident";
 };
 
@@ -98,23 +168,20 @@ const normalizeCrashPacket = (raw, topic = "") => {
   const lat = parseFiniteNumber(data.lat, data.latitude, data.gps?.lat, data.location?.lat) ?? DEFAULT_MAP_CENTER.lat;
   const lng = parseFiniteNumber(data.lng, data.lon, data.longitude, data.gps?.lng, data.gps?.lon, data.location?.lng, data.location?.lon) ?? DEFAULT_MAP_CENTER.lng;
   const tsValue = getFirstDefined(data.ts_ms, data.timestamp, data.time, data.ts);
-  const timestamp =
-    typeof tsValue === "number"
-      ? new Date(tsValue < 1000000000000 ? tsValue * 1000 : tsValue).toISOString()
-      : tsValue
-        ? new Date(tsValue).toISOString()
-        : new Date().toISOString();
-  const eventText = String(getFirstDefined(data.event, data.status, data.type, data.code, "")).toUpperCase();
-  const isIncident = parsed && isIncidentEvent(data, eventText);
+  const timestamp = normalizeTimestamp(tsValue);
+  const explicitCrashFlag = hasExplicitCrashFlag(data);
+  const eventText = normalizeEventText(data.event, data.status, data.type, data.code);
+  const isIncident = parsed && isIncidentEvent(data, eventText, explicitCrashFlag);
+  const normalizedEvent = eventText || (isIncident ? "CRASH_CONFIRMED" : "UNKNOWN");
 
   return {
     deviceId,
     lat,
     lng,
-    timestamp: Number.isNaN(Date.parse(timestamp)) ? new Date().toISOString() : timestamp,
-    event: eventText || "UNKNOWN",
+    timestamp,
+    event: normalizedEvent,
     isIncident,
-    status: isIncident ? eventText || "INCIDENT" : eventText || "ONLINE",
+    status: isIncident ? normalizedEvent : normalizedEvent || "ONLINE",
     raw: data,
     topic,
   };
@@ -189,7 +256,6 @@ export default function App() {
 
   // --- Connection ---
   const [connected, setConnected] = useState(false);
-  const [bridgeConnected, setBridgeConnected] = useState(false);
   const [brokerUrl, setBrokerUrl] = useState(MQTT_BROKER_URLS[0] || "");
   const mqttClientRef = useRef(null);
 
@@ -357,13 +423,13 @@ export default function App() {
         console.log(`[GPS Crash Dashboard] MQTT connected: ${nextBrokerUrl}`);
         setConnected(true);
 
-        client.subscribe(MQTT_TOPIC_FILTER, { qos: 0 }, (err) => {
+        client.subscribe(MQTT_TOPIC_FILTERS, { qos: 1 }, (err) => {
           if (err) {
-            console.warn(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTER}:`, err);
+            console.warn(`[GPS Crash Dashboard] MQTT subscribe failed for ${MQTT_TOPIC_FILTERS.join(", ")}:`, err);
             scheduleReconnect(normalizedIndex + 1);
             return;
           }
-          console.log(`[GPS Crash Dashboard] MQTT subscribed: ${MQTT_TOPIC_FILTER}`);
+          console.log(`[GPS Crash Dashboard] MQTT subscribed: ${MQTT_TOPIC_FILTERS.join(", ")}`);
         });
       });
 
@@ -477,38 +543,6 @@ export default function App() {
     },
     [addToast, playCrashAlertSound]
   );
-
-  useEffect(() => {
-    if (!import.meta.env.DEV || typeof EventSource === "undefined") return;
-
-    const source = new EventSource("/api/mqtt-events");
-
-    source.onmessage = (event) => {
-      try {
-        const bridgeEvent = JSON.parse(event.data);
-        if (bridgeEvent.type === "status") {
-          setBridgeConnected(Boolean(bridgeEvent.connected));
-          if (bridgeEvent.brokerUrl) {
-            setBrokerUrl(bridgeEvent.brokerUrl);
-          }
-          return;
-        }
-
-        if (bridgeEvent.type === "message") {
-          setBridgeConnected(true);
-          handleIncomingData(bridgeEvent.payload, bridgeEvent.topic);
-        }
-      } catch (err) {
-        console.warn("[GPS Crash Dashboard] Failed to parse bridge event:", err);
-      }
-    };
-
-    source.onerror = () => {
-      setBridgeConnected(false);
-    };
-
-    return () => source.close();
-  }, [handleIncomingData]);
 
   // =======================
   // MAP MARKER HELPERS
@@ -651,7 +685,7 @@ export default function App() {
 
   // Determine overall status for the status bar
   const hasActiveIncidents = Object.keys(incidents).length > 0;
-  const mqttOnline = connected || bridgeConnected;
+  const mqttOnline = connected;
 
   // =======================
   // RENDER
@@ -674,7 +708,10 @@ export default function App() {
         </div>
 
         <div className="top-nav-actions">
-          <div className={`connection-indicator ${mqttOnline ? "connected" : "disconnected"}`} title={`MQTT broker: ${brokerUrl || "not configured"}`}>
+          <div
+            className={`connection-indicator ${mqttOnline ? "connected" : "disconnected"}`}
+            title={`MQTT broker: ${brokerUrl || "not configured"}\nTopics: ${MQTT_TOPIC_FILTERS.join(", ")}`}
+          >
             <span className="connection-dot"></span>
             {mqttOnline ? "Connected" : "Disconnected"}
           </div>
